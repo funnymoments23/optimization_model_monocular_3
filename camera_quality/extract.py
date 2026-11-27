@@ -206,6 +206,11 @@ def main():
                 total = int(np.asarray(person["pose"]).shape[0])
                 joints = smpl_joints(model, person, j_reg, reg_idx, device)
                 fids = frame_ids_of(person, total)
+                if not np.array_equal(fids, np.arange(total)):
+                    # pipeline goc ghep GT theo so thu tu 0..T-1; o day ghep theo frame_ids cua WHAM
+                    gaps = int(np.sum(np.diff(fids) != 1))
+                    print(f"  [chu y] seg{seg} cam{cam}: frame_ids khong phai 0..{total - 1} "
+                          f"(bat dau {fids[0]}, {gaps} cho dut quang) -> ghep GT theo frame_ids")
                 gt_path = seq_dir / "GT" / f"video_{cam}_seg_{seg}.json"
                 if gt_path.exists():
                     mpjpe = per_frame_mpjpe(joints, fids, _load_segment_gt(gt_path), names, p1, map_data)
