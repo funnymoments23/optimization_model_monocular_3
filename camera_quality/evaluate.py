@@ -110,6 +110,7 @@ def main():
     ap.add_argument("--features", default="output/camera_quality/features.csv")
     ap.add_argument("--split", choices=["segment", "subject"], default="segment")
     ap.add_argument("--out", default="output/camera_quality/eval_{split}.json")
+    ap.add_argument("--n-boot", type=int, default=2000, help="so lan bootstrap cho khoang tin cay")
     args = ap.parse_args()
 
     rows = load(args.features)
@@ -124,6 +125,7 @@ def main():
     strategies = ["oracle", "random", "worst", "cam_prior"] + [f"h:{f}" for f in feats_avail] + ["model"]
     res = {s: {"mpjpe": [], "regret": [], "top1": [], "rho": []} for s in strategies}
     learned_dirs = defaultdict(list)
+    group_seg = []  # segment cua tung nhom (theo dung thu tu da ghi vao res)
 
     for fold in folds:
         train = [r for r in rows if fold_key(r, args.split) != fold]
@@ -141,6 +143,7 @@ def main():
         for r in test:
             by_g[group_key(r)].append(r)
         for g in by_g.values():
+            group_seg.append(str((g[0]["subject"], g[0]["seq"], int(g[0]["seg"]))))
             y = np.array([r["label_mpjpe"] for r in g])
             best = y.min()
             scores = {
@@ -168,14 +171,43 @@ def main():
                 res[s]["top1"].append(float(y[pick] == best))
                 res[s]["rho"].append(spearman(np.where(np.isinf(sc), np.nan, sc), y))
 
-    print(f"\n{'chien luoc':22s} {'MPJPE':>8s} {'regret':>8s} {'top1':>6s} {'rho':>6s}")
+    # Bootstrap theo SEGMENT (cluster, paired): cac cua so cung segment phu thuoc nhau nen
+    # boc lai ca segment thay vi tung cua so. Khoang tin cay 95% cua chenh lech MPJPE.
+    rng = np.random.default_rng(0)
+    seg_ids = np.array(group_seg)
+    uniq = np.unique(seg_ids)
+    members = [np.where(seg_ids == u)[0] for u in uniq]
+    boot = [np.concatenate([members[i] for i in rng.integers(0, len(uniq), len(uniq))]) for _ in range(args.n_boot)]
+    n_g = len(seg_ids)
+
+    def paired_ci(s, ref):
+        a, b = np.array(res[s]["mpjpe"]), np.array(res[ref]["mpjpe"])
+        if len(a) != len(b) or len(a) != n_g or n_g == 0:
+            return None
+        d = a - b
+        means = np.array([d[ix].mean() for ix in boot])
+        return float(d.mean()), float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+    def fmt(ci):
+        if ci is None:
+            return f"{'-':>22s}"
+        star = "*" if ci[2] < 0 or ci[1] > 0 else " "
+        return f"{ci[0]:+6.1f} [{ci[1]:+5.1f},{ci[2]:+5.1f}]{star}"
+
+    print(f"\n{'chien luoc':22s} {'MPJPE':>8s} {'regret':>8s} {'top1':>6s} {'rho':>6s}"
+          f"  {'so voi random [CI95]':>22s}  {'so voi cam_prior [CI95]':>24s}")
     summary = {}
     for s in strategies:
         if not res[s]["mpjpe"]:
             continue
         m = {k: float(np.nanmean(v)) if len(v) else float("nan") for k, v in res[s].items()}
+        m["vs_random"] = paired_ci(s, "random")
+        m["vs_cam_prior"] = paired_ci(s, "cam_prior")
         summary[s] = m
-        print(f"{s:22s} {m['mpjpe']:8.1f} {m['regret']:8.1f} {m['top1']*100:5.0f}% {m['rho']:6.2f}")
+        print(f"{s:22s} {m['mpjpe']:8.1f} {m['regret']:8.1f} {m['top1']*100:5.0f}% {m['rho']:6.2f}"
+              f"  {fmt(m['vs_random'])}  {fmt(m['vs_cam_prior']):>24s}")
+    print(f"(am = tot hon; * = khoang tin cay 95% khong chua 0; bootstrap theo {len(uniq)} segment, "
+          f"{n_g} nhom, {args.n_boot} lan)")
     print("\nHuong dac trung hoc duoc (+1: lon = xau):",
           {f: float(np.mean(d)) for f, d in learned_dirs.items()})
 
