@@ -158,9 +158,14 @@ def main():
     ap.add_argument("--window", type=int, default=100, help="so frame moi cua so; 0 = ca segment")
     ap.add_argument("--max-offset", type=int, default=30, help="do lech dong bo toi da (frame) khi tim offset")
     ap.add_argument("--min-label-frames", type=int, default=10, help="bo cua so co it frame co GT hon nguong nay")
+    ap.add_argument("--subjects", default="", help="chi dung cac subject nay, vi du S8 hoac S1,S8 (mac dinh: tat ca)")
     args = ap.parse_args()
 
+    keep = {s.strip() for s in args.subjects.split(",") if s.strip()}
     cams = [Cam(p) for p in sorted(Path(args.cache_dir).glob("*.npz")) if not p.name.endswith(".tmp.npz")]
+    if keep:
+        cams = [c for c in cams if c.subject in keep]
+        print(f"Chi dung subject: {sorted(keep)}")
     groups = defaultdict(list)
     for c in cams:
         groups[c.group].append(c)
