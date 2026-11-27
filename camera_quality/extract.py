@@ -19,9 +19,12 @@ Vi du (Colab):
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -163,6 +166,9 @@ def main():
     ap.add_argument("--exclude-cams", default="", help="vi du: 1,3")
     ap.add_argument("--inspect", action="store_true", help="chi in cau truc pkl dau tien roi thoat")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--max-new", type=int, default=0, help="xu ly toi da N file moi moi lan chay (0 = khong gioi han)")
+    ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
+                    help="SMPL chay CPU cung du nhanh; dung cpu de khong ton quota GPU cua Colab")
     args = ap.parse_args()
 
     if args.inspect:
@@ -182,7 +188,8 @@ def main():
     excluded = {int(x) for x in args.exclude_cams.split(",") if x.strip()}
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"SMPL device: {device}")
     model = create_smpl_model(args.smpl_model).to(device)
     j_reg = np.load(args.j_regressor)
     map_data = load_keypoints3d_map(args.keypoints_map)
@@ -191,16 +198,23 @@ def main():
     p1 = list(map_data["priority1"])
 
     manifest = []
+    n_new, t_start = 0, time.perf_counter()
     for sd in args.seq_dir:
         seq_dir = Path(sd)
         subj, seq = subject_seq_from_dir(seq_dir)
         items = [x for x in discover(seq_dir) if x[0] not in excluded]
-        print(f"[{subj}/{seq}] {len(items)} camera-segment")
+        done = sum((out_dir / f"{subj}_{seq}_seg{s}_cam{c}.npz").exists() for c, s, _ in items)
+        print(f"[{subj}/{seq}] {len(items)} camera-segment, da xong truoc do: {done}")
         for cam, seg, pkl in items:
             out = out_dir / f"{subj}_{seq}_seg{seg}_cam{cam}.npz"
             if out.exists() and not args.overwrite:
                 manifest.append(out.name)
                 continue
+            if args.max_new and n_new >= args.max_new:
+                print(f"Dat gioi han --max-new {args.max_new}. Chay lai lenh de xu ly tiep.")
+                break
+            t_file = time.perf_counter()
+            person = None
             try:
                 person = _extract_person_payload(load_joblib_compat(pkl))
                 total = int(np.asarray(person["pose"]).shape[0])
@@ -217,16 +231,30 @@ def main():
                 else:
                     mpjpe = np.full(total, np.nan, dtype=np.float32)
                 extra = optional_2d(person, total)
+                # ghi ra file tam roi doi ten: neu Colab ngat giua chung se khong de lai file .npz hong
+                tmp = out.with_name(out.stem + ".tmp.npz")
                 np.savez_compressed(
-                    out, joints=joints.astype(np.float32), frame_ids=fids, mpjpe=mpjpe,
+                    tmp, joints=joints.astype(np.float32), frame_ids=fids, mpjpe=mpjpe,
                     names=np.array(names), subject=subj, seq=seq, seg=seg, cam=cam, **extra,
                 )
+                os.replace(tmp, out)
                 manifest.append(out.name)
-                print(f"  seg{seg} cam{cam}: {total} frame, MPJPE TB {np.nanmean(mpjpe):.1f} mm, extra={list(extra)}")
+                n_new += 1
+                print(f"  seg{seg} cam{cam}: {total} frame, MPJPE TB {np.nanmean(mpjpe):.1f} mm, "
+                      f"extra={list(extra)} | {time.perf_counter() - t_file:.0f}s "
+                      f"(tong {(time.perf_counter() - t_start) / 60:.1f} phut)", flush=True)
             except Exception as exc:  # mot file hong khong lam dung ca lan chay
-                print(f"  [LOI] {pkl}: {exc}")
+                print(f"  [LOI] {pkl}: {exc}", flush=True)
+            finally:
+                del person  # pkl co mang 'verts' rat lon (T x 6890 x 3): giai phong ngay
+                gc.collect()
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+        else:
+            continue
+        break  # thoat ca vong seq khi dat --max-new
     (out_dir / "manifest.json").write_text(json.dumps(sorted(set(manifest)), indent=1), encoding="utf-8")
-    print(f"Xong. {len(manifest)} file trong {out_dir}")
+    print(f"Xong luot nay: {n_new} file moi, {len(set(manifest))} file trong {out_dir}")
 
 
 if __name__ == "__main__":

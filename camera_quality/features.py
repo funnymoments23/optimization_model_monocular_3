@@ -160,7 +160,7 @@ def main():
     ap.add_argument("--min-label-frames", type=int, default=10, help="bo cua so co it frame co GT hon nguong nay")
     args = ap.parse_args()
 
-    cams = [Cam(p) for p in sorted(Path(args.cache_dir).glob("*.npz"))]
+    cams = [Cam(p) for p in sorted(Path(args.cache_dir).glob("*.npz")) if not p.name.endswith(".tmp.npz")]
     groups = defaultdict(list)
     for c in cams:
         groups[c.group].append(c)
